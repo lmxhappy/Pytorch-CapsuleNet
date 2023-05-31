@@ -92,6 +92,7 @@ def train(model, optimizer, train_loader, epoch):
         correct = sum(np.argmax(masked.data.cpu().numpy(), 1) == np.argmax(target.data.cpu().numpy(), 1))
         train_loss = loss.item()
         total_loss += train_loss
+
         if batch_id % 100 == 0:
             tqdm.write("Epoch: [{}/{}], Batch: [{}/{}], train accuracy: {:.6f}, loss: {:.6f}".format(
                 epoch,
@@ -101,6 +102,7 @@ def train(model, optimizer, train_loader, epoch):
                 correct / float(BATCH_SIZE),
                 train_loss / float(BATCH_SIZE)
                 ))
+
     tqdm.write('Epoch: [{}/{}], train loss: {:.6f}'.format(epoch,N_EPOCHS,total_loss / len(train_loader.dataset)))
 
 
