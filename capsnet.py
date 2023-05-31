@@ -21,6 +21,9 @@ class ConvLayer(nn.Module):
 
 
 class PrimaryCaps(nn.Module):
+    """
+    PrimaryCaps 层不涉及到动态路由算法。在 PrimaryCaps 层中，每个胶囊的输出向量都是通过一个独立的卷积层生成的，与其他胶囊无关，因此不需要进行动态路由操作。
+    """
     def __init__(self, num_capsules=8, in_channels=256, out_channels=32, kernel_size=9, num_routes=32 * 6 * 6):
         super(PrimaryCaps, self).__init__()
         self.num_routes = num_routes
@@ -31,16 +34,25 @@ class PrimaryCaps(nn.Module):
     def forward(self, x):
         """
 
-        :param x: [B, out_channels, 24, 24]
+        :param x: [B, in_channels, input_height, input_width]
         :type x:
-        :return:
+        :return: [B, num_routes, 8]
         :rtype:
         """
         # out_channels=32
-        # [B, out_channels, 8, 8]
+        # list of tensor. tensor shape [B, out_channels, output_height, output_width]. num_capsules个元素。
         u = [capsule(x) for capsule in self.capsules]
+
+        # [B, num_capsules, out_channels, output_height, output_width]
         u = torch.stack(u, dim=1)
+
+        # [B, num_routes, 8]
+        # todo num_routes= num_capsules * out_channels* output_height???
+        # 将多个cnn的的结果concat到一起，每个cnn的结果又由多个channel结果组成
         u = u.view(x.size(0), self.num_routes, -1)
+
+        # 虽然 PrimaryCaps 层不涉及到动态路由算法，但是在实现中仍然使用了 squash 函数
+        # [B, num_routes, 8]
         return self.squash(u)
 
     def squash(self, input_tensor):
@@ -172,7 +184,10 @@ class Decoder(nn.Module):
 class CapsNet(nn.Module):
     def __init__(self, config=None):
         super(CapsNet, self).__init__()
+        self.config = None
         if config:
+            self.config = config
+            # pc: primary capsule的缩写；dc：digit capsule的缩写。
             self.conv_layer = ConvLayer(config.cnn_in_channels, config.cnn_out_channels, config.cnn_kernel_size)
             self.primary_capsules = PrimaryCaps(config.pc_num_capsules, config.pc_in_channels, config.pc_out_channels,
                                                 config.pc_kernel_size, config.pc_num_routes)
@@ -195,16 +210,16 @@ class CapsNet(nn.Module):
         :return:
         :rtype:
         """
-        # [B, cnn_in_channels, input_height, input_width]
+        # [B, cnn_out_channels, input_height, input_width]
         conv_out = self.conv_layer(data)
 
-        # [B,2048, 8]
+        # [B, pc_num_routes, 8]
         primary_out = self.primary_capsules(conv_out)
 
-        # [B, num_capsules, out_channels, 1]
+        # [B, dc_num_capsules, dc_out_channels, 1]
         output = self.digit_capsules(primary_out)
 
-        # reconstructions:[B, 3, 32, 32]
+        # reconstructions:[B, cnn_out_channels, input_height, input_width]
         # masked:[B, out_channels]
         reconstructions, masked = self.decoder(output, data)
 
@@ -213,30 +228,37 @@ class CapsNet(nn.Module):
     def loss(self, data, pred, target, reconstructions):
         """
 
-        :param data: 胶囊网络的输入值。[B, 3, 32, 32]
+        :param data: 胶囊网络的输入值。[B, cnn_in_channels, input_height, input_width]
         :type data:
-        :param pred: 胶囊网络的预估输出值。[B, 10, 16, 1]
+        :param pred: 胶囊网络的预估输出值。[B, num_capsules, 16, 1]
         :type pred:
         :param target: target。[B, 10]
         :type target:
-        :param reconstructions: decoder重建值。[B, 3, 32, 32]
+        :param reconstructions: decoder重建值。[B, cnn_in_channels, input_height, input_width]
         :type reconstructions:
         :return:
         :rtype:
         """
         return self.margin_loss(pred, target) + self.reconstruction_loss(data, reconstructions)
 
-    def margin_loss(self, x, labels, size_average=True):
-        batch_size = x.size(0)
+    def margin_loss(self, pred, labels, size_average=True):
+        batch_size = pred.size(0)
+        pred_norm = (pred ** 2).sum(dim=2, keepdim=True)
 
-        v_c = torch.sqrt((x ** 2).sum(dim=2, keepdim=True))
+        # 每个胶囊的l2 norm
+        # [B, num_capsules, 1, 1]
+        v_c = torch.sqrt(pred_norm)
 
+        # [B, num_capsules]
         left = F.relu(0.9 - v_c).view(batch_size, -1)
         right = F.relu(v_c - 0.1).view(batch_size, -1)
 
-        loss = labels * left + 0.5 * (1.0 - labels) * right
+        lambda_value = 0.5
+        # [B, num_capsules]
+        loss = labels * left + lambda_value * (1.0 - labels) * right
         loss = loss.sum(dim=1).mean()
 
+        # scalar
         return loss
 
     def reconstruction_loss(self, data, reconstructions):
